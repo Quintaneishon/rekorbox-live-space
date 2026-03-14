@@ -1,0 +1,20 @@
+{
+  "name": "rekordbox-live",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Pro DJ Link bridge — reads Rekordbox track metadata and streams it to the particle visualizer via WebSocket",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "prolink-connect": "^0.6.0",
+    "ws": "^8.18.0",
+    "express": "^4.19.0",
+    "dotenv": "^16.4.0",
+    "cors": "^2.8.5"
+  },
+  "overrides": {
+    "better-sqlite3": "^9.4.3"
+  }
+}
