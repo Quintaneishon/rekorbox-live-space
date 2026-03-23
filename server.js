@@ -23,8 +23,8 @@ import { startProlinkListener } from './prolink.js';
 
 const PORT             = parseInt(process.env.PORT || '3001', 10);
 const PYTHON_BACKEND   = process.env.PYTHON_BACKEND_URL || 'http://127.0.0.1:5000';
-const MODEL            = process.env.MODEL   || 'whisper_contrastive';
-const DATASET          = process.env.DATASET || 'base';
+const MODEL            = process.env.MODEL   || 'mert';
+const DATASET          = process.env.DATASET || '95m';
 
 // ─── Express ─────────────────────────────────────────────────────────────────
 const app = express();

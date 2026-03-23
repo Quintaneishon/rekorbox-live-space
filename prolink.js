@@ -28,7 +28,13 @@ export async function startProlinkListener({ onNowPlaying, onPlayState }) {
   console.log('[prolink] Bringing network online (reuseAddr=true)…');
   const network = await bringOnline();
 
-  console.log('[prolink] Network online. Starting status monitoring…');
+  console.log('[prolink] Waiting for Pioneer device on the network…');
+  await network.autoconfigFromPeers();
+
+  console.log('[prolink] Device found. Connecting…');
+  network.connect();
+
+  console.log('[prolink] Network connected. Starting status monitoring…');
   network.statusEmitter.start();
 
   // MixstatusProcessor watches all decks and fires 'nowPlaying' when a
