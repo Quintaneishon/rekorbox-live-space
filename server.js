@@ -67,19 +67,20 @@ app.get('/tags', async (_req, res) => {
 // POST /play   { playing: bool }
 let lastManualTitle = '';
 app.post('/track', (req, res) => {
-  const { title = '', playing = true } = req.body;
+  const { title = '', playing = true, playerNum } = req.body;
   lastManualTitle = title;
   const match = matchTitle(title);
   broadcast({
-    type:    'track_change',
+    type:      'track_change',
     title,
-    playing: !!playing,
-    idx:     match ? match.idx   : null,
-    point:   match ? match.point : null,
-    score:   match ? match.score : null,
+    playing:   !!playing,
+    playerNum: playerNum ?? null,
+    idx:       match ? match.idx   : null,
+    point:     match ? match.point : null,
+    score:     match ? match.score : null,
   });
   const found = match ? `matched idx=${match.idx} (score=${match.score.toFixed(2)})` : 'no match';
-  console.log(`[manual] track_change "${title}" playing=${playing} — ${found}`);
+  console.log(`[manual] track_change deck${playerNum != null ? playerNum + 1 : '?'} "${title}" playing=${playing} — ${found}`);
   res.json({ ok: true, found: !!match, idx: match?.idx ?? null });
 });
 
