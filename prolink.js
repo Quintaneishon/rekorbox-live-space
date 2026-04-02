@@ -17,7 +17,7 @@ import dgram from 'dgram';
 const _origCreate = dgram.createSocket.bind(dgram);
 dgram.createSocket = function (opts, cb) {
   if (typeof opts === 'string') opts = { type: opts };
-  opts = { ...opts, reuseAddr: true };
+  opts = { ...opts, reuseAddr: true, reusePort: true };
   return cb ? _origCreate(opts, cb) : _origCreate(opts);
 };
 

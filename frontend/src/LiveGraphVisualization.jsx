@@ -2,39 +2,67 @@
  * LiveGraphVisualization
  *
  * 3-D force-graph driven by Rekordbox via WebSocket.
+ * Visual style mirrors deep-audio-embeddings (30 colours, floating text sprites).
  *
  * Behaviour:
- *  - Graph data (nodes + KNN links) fetched once from the Node.js backend
+ *  - Graph data (nodes + KNN links) fetched once from Node.js backend
+ *    using the same params as deep-audio-embeddings: musicnn_multisignal / msd / k=30
  *  - WebSocket receives track_change / play_state events
- *  - Currently-playing node blinks yellow; camera flies to it automatically
- *  - No click-to-play: clicks only highlight a node's neighbours (navigation)
- *  - Now-playing bar is read-only (no transport buttons)
- *  - Search panel navigates + highlights, no audio
+ *  - Currently-playing node blinks; camera flies to it automatically
+ *  - Clicks highlight a node's neighbours
+ *  - Search panel navigates + sets now-playing via POST /track
  */
 
 import React, {
   useState, useEffect, useCallback, useRef, useMemo,
 } from 'react';
 import ForceGraph3D from 'react-force-graph-3d';
+import * as THREE from 'three';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const API = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
 const WS  = import.meta.env.VITE_WS_URL     || 'ws://localhost:3001';
 
 const STATIC_COLORS = [
-  [255, 0, 0], [255, 105, 180], [138, 43, 226], [255, 215, 0],
-  [0, 255, 255], [255, 140, 0], [34, 139, 34], [0, 0, 255],
-  [128, 128, 128], [139, 69, 19],
+  [230, 25, 75],    // red
+  [60, 180, 75],    // green
+  [255, 225, 25],   // yellow
+  [0, 130, 200],    // blue
+  [245, 130, 48],   // orange
+  [145, 30, 180],   // purple
+  [70, 240, 240],   // cyan
+  [240, 50, 230],   // magenta
+  [210, 245, 60],   // lime
+  [250, 190, 212],  // pink
+  [0, 128, 128],    // teal
+  [220, 190, 255],  // lavender
+  [170, 110, 40],   // brown
+  [255, 250, 200],  // beige
+  [128, 0, 0],      // maroon
+  [170, 255, 195],  // mint
+  [128, 128, 0],    // olive
+  [255, 215, 180],  // apricot
+  [0, 0, 128],      // navy
+  [128, 128, 128],  // grey
+  [255, 80, 80],    // coral
+  [0, 200, 100],    // emerald
+  [200, 150, 0],    // gold
+  [100, 100, 255],  // periwinkle
+  [255, 160, 0],    // amber
+  [0, 180, 220],    // sky blue
+  [180, 0, 180],    // violet
+  [100, 220, 100],  // sage
+  [255, 100, 150],  // rose
+  [50, 50, 200],    // indigo
 ];
-const DEFAULT_COLOR           = [200, 200, 200];
-const HIGHLIGHT_COLOR         = '#ffff00';
-const HIGHLIGHT_NEIGHBOR      = '#ffffff';
-const HIGHLIGHT_EDGE          = 'rgba(255,255,0,0.9)';
-const DIM_NODE_OPACITY        = 0.12;
-const DIM_LINK_OPACITY        = 0.03;
-const PLAYING_COLOR_A         = '#ffffff';   // blink frame A
-const PLAYING_SIZE            = 8;
-const PLAYING_NEIGHBOR_SIZE   = 3;
+
+const DEFAULT_COLOR         = [200, 200, 200];
+const HIGHLIGHT_COLOR       = '#ffff00';
+const HIGHLIGHT_NEIGHBOR    = '#ffffff';
+const HIGHLIGHT_EDGE        = 'rgba(255,255,0,0.6)';
+const PLAYING_SIZE_LO       = 2;
+const PLAYING_SIZE_HI       = 4;
+const PLAYING_NEIGHBOR_SIZE = 2;
 
 const rgbToHex = (r, g, b) =>
   '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
@@ -55,38 +83,34 @@ const getColor = (genre, colorMap) => {
   return colorMap[genre.toLowerCase()] || DEFAULT_COLOR;
 };
 
-/** Normalise a filename / Rekordbox title for fuzzy matching */
 const normalize = (s) =>
-  s.replace(/\.[^.]+$/, '').toLowerCase().replace(/[_\-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  s.replace(/\.[^.]+$/, '').toLowerCase()
+   .replace(/[_\-]+/g, ' ')
+   .replace(/[^\w\s]/g, ' ')
+   .replace(/\s+/g, ' ').trim();
 
 // ── Component ────────────────────────────────────────────────────────────────
 export const LiveGraphVisualization = () => {
   const fgRef        = useRef();
   const containerRef = useRef(null);
 
-  const [graphData,      setGraphData]      = useState({ nodes: [], links: [] });
-  const [genreColorMap,  setGenreColorMap]  = useState(null);
-  const [loading,        setLoading]        = useState(true);
-  const [error,          setError]          = useState(null);
+  const [graphData,     setGraphData]     = useState({ nodes: [], links: [] });
+  const graphNodesRef   = useRef([]);           // always-current ref, safe inside WS closure
+  const [genreColorMap, setGenreColorMap] = useState(null);
+  const [loading,       setLoading]       = useState(true);
+  const [error,         setError]         = useState(null);
 
-  // WebSocket
-  const [wsStatus,       setWsStatus]       = useState('connecting');
-
-  // Playback state (driven by WS)
-  //deckTracks: Map of playerNum → { nodeId, title, tag, playing }
-  // When Pro DJ Link is not active, playerNum is always 0 (manual control)
+  const [wsStatus,      setWsStatus]      = useState('connecting');
   const [deckTracks,    setDeckTracks]    = useState(new Map());
   const [isPlaying,     setIsPlaying]     = useState(false);
-  const [currentTrack,  setCurrentTrack]  = useState(null); // most recent { title, tag }
+  const [currentTrack,  setCurrentTrack]  = useState(null);
 
-  // Derived: set of all nodeIds currently playing across all decks
   const playingNodeIds = useMemo(() => {
     const ids = new Set();
     deckTracks.forEach(d => { if (d.playing && d.nodeId) ids.add(d.nodeId); });
     return ids;
   }, [deckTracks]);
 
-  // Blink: toggle every 500 ms when playing
   const [blinkOn, setBlinkOn] = useState(false);
   useEffect(() => {
     if (!isPlaying) { setBlinkOn(false); return; }
@@ -94,17 +118,16 @@ export const LiveGraphVisualization = () => {
     return () => clearInterval(id);
   }, [isPlaying]);
 
-  // Highlight (for search / click-to-highlight)
   const [highlightNodeId, setHighlightNodeId] = useState(null);
   const [searchQuery,     setSearchQuery]     = useState('');
 
-  // ── Graph data load ────────────────────────────────────────────────────────
+  // ── Graph data load — same params as deep-audio-embeddings ────────────────
   useEffect(() => {
     const load = async () => {
       try {
         const [tagsRes, graphRes] = await Promise.all([
           fetch(`${API}/tags`),
-          fetch(`${API}/graph`),
+          fetch(`${API}/graph?red=musicnn_multisignal&dataset=msd&k=30`),
         ]);
         if (!tagsRes.ok)  throw new Error(`/tags HTTP ${tagsRes.status}`);
         if (!graphRes.ok) throw new Error(`/graph HTTP ${graphRes.status}`);
@@ -113,7 +136,9 @@ export const LiveGraphVisualization = () => {
         const graph = await graphRes.json();
 
         setGenreColorMap(buildGenreColorMap(Array.isArray(tags) ? tags : []));
-        setGraphData({ nodes: graph.nodes || [], links: graph.links || [] });
+        const nodes = graph.nodes || [];
+        graphNodesRef.current = nodes;
+        setGraphData({ nodes, links: graph.links || [] });
       } catch (err) {
         setError(err.message);
       } finally {
@@ -123,7 +148,7 @@ export const LiveGraphVisualization = () => {
     load();
   }, []);
 
-  // ── Neighbour map (for highlight + dimming) ───────────────────────────────
+  // ── Neighbour map ─────────────────────────────────────────────────────────
   const neighborMap = useMemo(() => {
     const map = new Map();
     graphData.links.forEach(link => {
@@ -137,7 +162,6 @@ export const LiveGraphVisualization = () => {
     return map;
   }, [graphData]);
 
-  // For highlight: prefer explicit search highlight, fall back to first playing node
   const firstPlayingId     = useMemo(() => [...playingNodeIds][0] ?? null, [playingNodeIds]);
   const activeHighlight    = highlightNodeId ?? firstPlayingId;
   const highlightNeighbors = useMemo(
@@ -153,24 +177,22 @@ export const LiveGraphVisualization = () => {
     fgRef.current.cameraPosition(
       { x: nx, y: ny + 120, z: nz + 300 },
       { x: nx, y: ny, z: nz },
-      2000,
+      2500,
     );
   }, []);
 
-  // ── Find graph node by filename (fuzzy) ───────────────────────────────────
+  // ── Find graph node by title (fuzzy) — uses ref so WS never needs to reconnect ──
   const findNode = useCallback((filename) => {
-    if (!filename) return null;
+    const nodes = graphNodesRef.current;
+    if (!filename || nodes.length === 0) return null;
     const q = normalize(filename);
-    // exact first
-    let found = graphData.nodes.find(n => normalize(n.name) === q);
+    let found = nodes.find(n => normalize(n.name) === q);
     if (found) return found;
-    // substring
-    found = graphData.nodes.find(n => normalize(n.name).includes(q) || q.includes(normalize(n.name)));
+    found = nodes.find(n => normalize(n.name).includes(q) || q.includes(normalize(n.name)));
     if (found) return found;
-    // word-overlap
     const qWords = new Set(q.split(' ').filter(Boolean));
     let best = null, bestScore = 0;
-    for (const n of graphData.nodes) {
+    for (const n of nodes) {
       const nw = new Set(normalize(n.name).split(' ').filter(Boolean));
       const inter = [...qWords].filter(w => nw.has(w)).length;
       const union = new Set([...qWords, ...nw]).size;
@@ -178,7 +200,7 @@ export const LiveGraphVisualization = () => {
       if (score > bestScore) { bestScore = score; best = n; }
     }
     return bestScore >= 0.4 ? best : null;
-  }, [graphData.nodes]);
+  }, []); // no deps — reads from ref
 
   // ── WebSocket ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -235,44 +257,35 @@ export const LiveGraphVisualization = () => {
       clearTimeout(reconnectTimer);
       ws?.close();
     };
+    // findNode reads from a ref; flyToNode reads from a ref — no deps needed
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [graphData.nodes, findNode, flyToNode]);
+  }, []);
 
   // ── Node colours ─────────────────────────────────────────────────────────
   const nodeColor = useCallback((node) => {
-    const isOnAir   = playingNodeIds.has(node.id);
-    const isHighlit = node.id === activeHighlight;
+    const isOnAir    = playingNodeIds.has(node.id);
+    const isHighlit  = node.id === activeHighlight;
     const isNeighbor = highlightNeighbors.has(node.id);
 
-    if (isOnAir) {
-      // Blink between white and genre colour; all on-air decks blink together
-      return blinkOn ? PLAYING_COLOR_A : rgbToHex(...getColor(node.tag, genreColorMap));
-    }
-
-    if (isHighlightActive) {
-      if (isHighlit)  return HIGHLIGHT_COLOR;
-      if (isNeighbor) return HIGHLIGHT_NEIGHBOR;
-      const c = getColor(node.tag, genreColorMap);
-      return `rgba(${c[0]},${c[1]},${c[2]},${DIM_NODE_OPACITY})`;
-    }
-
+    if (isHighlightActive && isHighlit)  return HIGHLIGHT_COLOR;
+    if (isHighlightActive && isNeighbor) return HIGHLIGHT_NEIGHBOR;
     const c = getColor(node.tag, genreColorMap);
     return rgbToHex(...c);
   }, [genreColorMap, playingNodeIds, activeHighlight, isHighlightActive, highlightNeighbors, blinkOn]);
 
   const nodeVal = useCallback((node) => {
-    if (playingNodeIds.has(node.id))     return PLAYING_SIZE;
-    if (node.id === activeHighlight)     return 6;
+    if (playingNodeIds.has(node.id))     return blinkOn ? PLAYING_SIZE_HI : PLAYING_SIZE_LO;
+    if (node.id === activeHighlight)     return 3;
     if (highlightNeighbors.has(node.id)) return PLAYING_NEIGHBOR_SIZE;
     return 1;
-  }, [playingNodeIds, activeHighlight, highlightNeighbors]);
+  }, [playingNodeIds, activeHighlight, highlightNeighbors, blinkOn]);
 
   const linkColor = useCallback((link) => {
     const s = typeof link.source === 'object' ? link.source.id : link.source;
     const t = typeof link.target === 'object' ? link.target.id : link.target;
     if (isHighlightActive) {
       const hit = s === activeHighlight || t === activeHighlight;
-      return hit ? HIGHLIGHT_EDGE : `rgba(100,100,100,${DIM_LINK_OPACITY})`;
+      if (hit) return HIGHLIGHT_EDGE;
     }
     if (link.sameGenre) {
       const src = typeof link.source === 'object' ? link.source : null;
@@ -286,19 +299,47 @@ export const LiveGraphVisualization = () => {
     if (isHighlightActive) {
       const s = typeof link.source === 'object' ? link.source.id : link.source;
       const t = typeof link.target === 'object' ? link.target.id : link.target;
-      return s === activeHighlight || t === activeHighlight ? 2 : 0.1;
+      if (s === activeHighlight || t === activeHighlight) return 1.5;
     }
     return link.sameGenre ? 0.8 : 0.3;
   }, [isHighlightActive, activeHighlight]);
 
   const nodeLabel = useCallback((node) => {
-    const playing = playingNodeIds.has(node.id) ? ' ▶ NOW PLAYING' : '';
+    const isTarget   = node.id === activeHighlight;
+    const isNeighbor = highlightNeighbors.has(node.id);
+    const playing    = playingNodeIds.has(node.id) ? ' ▶ NOW PLAYING' : '';
+    const badge      = isTarget ? ' (selected)' : isNeighbor ? ' (neighbour)' : playing;
     return `<div style="background:rgba(0,0,0,0.85);color:white;padding:6px 10px;border-radius:4px;font-size:13px">
-      <b>${node.name}</b>${playing}<br/>Genre: ${node.tag}
+      <b>${node.name}</b>${badge}<br/>Genre: ${node.tag}
     </div>`;
+  }, [activeHighlight, highlightNeighbors, playingNodeIds]);
+
+  // ── Floating 3-D text sprites (same as deep-audio-embeddings) ────────────
+  const nodeThreeObject = useCallback((node) => {
+    if (!playingNodeIds.has(node.id)) return null;
+
+    const canvas   = document.createElement('canvas');
+    const ctx      = canvas.getContext('2d');
+    const fontSize = 18;
+    const text     = node.name;
+    ctx.font = `bold ${fontSize}px Arial`;
+    const textWidth = ctx.measureText(text).width;
+    canvas.width  = Math.ceil(textWidth) + 20;
+    canvas.height = fontSize + 14;
+
+    ctx.font = `bold ${fontSize}px Arial`;
+    ctx.fillStyle = 'rgba(0,255,136,0.95)';
+    ctx.fillText(text, 10, fontSize + 3);
+
+    const texture  = new THREE.CanvasTexture(canvas);
+    const material = new THREE.SpriteMaterial({ map: texture, depthWrite: false });
+    const sprite   = new THREE.Sprite(material);
+    sprite.scale.set(10 * (canvas.width / canvas.height), 10, 1);
+    sprite.position.set(0, 10, 0);
+    return sprite;
   }, [playingNodeIds]);
 
-  // Click → highlight neighbours (no audio)
+  // Click → toggle highlight
   const handleNodeClick = useCallback((node) => {
     setHighlightNodeId(prev => prev === node.id ? null : node.id);
   }, []);
@@ -318,7 +359,6 @@ export const LiveGraphVisualization = () => {
     setHighlightNodeId(live.id);
     setSearchQuery('');
     flyToNode(live);
-    // Also set as now playing
     await fetch(`${API}/track`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -338,8 +378,7 @@ export const LiveGraphVisualization = () => {
   const wsLabel = { connecting: 'Connecting…', open: 'Live', closed: 'Reconnecting…', error: 'Error' }[wsStatus] || wsStatus;
   const wsColor = { connecting: '#ffd700', open: '#00ff88', closed: '#ff6060', error: '#ff6060' }[wsStatus] || '#888';
 
-  // ── Track colour for now-playing bar ─────────────────────────────────────
-  const trackC = getColor(currentTrack?.tag, genreColorMap);
+  const trackC       = getColor(currentTrack?.tag, genreColorMap);
   const trackColorStr = `rgb(${trackC[0]},${trackC[1]},${trackC[2]})`;
 
   // ── Loading / error screens ───────────────────────────────────────────────
@@ -367,6 +406,8 @@ export const LiveGraphVisualization = () => {
         nodeColor={nodeColor}
         nodeLabel={nodeLabel}
         nodeVal={nodeVal}
+        nodeThreeObject={nodeThreeObject}
+        nodeThreeObjectExtend={true}
         nodeResolution={8}
         nodeOpacity={0.9}
         linkColor={linkColor}
@@ -426,7 +467,7 @@ export const LiveGraphVisualization = () => {
           <div style={{ fontWeight: 'bold', marginBottom: 8 }}>Genres</div>
           {Object.entries(genreColorMap).map(([g, c]) => (
             <div key={g} style={{ display: 'flex', alignItems: 'center', marginBottom: 4 }}>
-              <div style={{ width: 10, height: 10, background: `rgb(${c[0]},${c[1]},${c[2]})`, marginRight: 8, borderRadius: 2 }} />
+              <div style={{ width: 12, height: 12, background: `rgb(${c[0]},${c[1]},${c[2]})`, marginRight: 8, borderRadius: 2 }} />
               <span>{g}</span>
             </div>
           ))}
@@ -458,7 +499,7 @@ export const LiveGraphVisualization = () => {
                   key={node.id}
                   onClick={() => handleSearchSelect(node)}
                   style={S.searchItem}
-                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.12)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.3)'; }}
+                  onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.15)'; e.currentTarget.style.borderColor = 'rgba(255,255,255,0.3)'; }}
                   onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.05)'; e.currentTarget.style.borderColor = 'transparent'; }}
                 >
                   <div style={{ fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.name}</div>
@@ -487,12 +528,12 @@ export const LiveGraphVisualization = () => {
 
 // ── Styles ───────────────────────────────────────────────────────────────────
 const S = {
-  fullCenter: { width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#121212', color: 'white', flexDirection: 'column' },
-  spinner: { width: 50, height: 50, border: '5px solid rgba(255,255,255,0.2)', borderTop: '5px solid white', borderRadius: '50%', animation: 'spin 1s linear infinite' },
+  fullCenter:  { width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#121212', color: 'white', flexDirection: 'column' },
+  spinner:     { width: 50, height: 50, border: '5px solid rgba(255,255,255,0.2)', borderTop: '5px solid white', borderRadius: '50%', animation: 'spin 1s linear infinite' },
   statusBadge: { position: 'absolute', top: 14, left: 14, display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(0,0,0,0.75)', color: 'white', padding: '7px 12px', borderRadius: 8, fontSize: 12, zIndex: 10, backdropFilter: 'blur(8px)' },
-  nowPlaying: { position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)', width: 'min(520px, 88vw)', background: 'rgba(0,0,0,0.9)', border: '1px solid', borderRadius: 10, padding: '12px 18px', display: 'flex', alignItems: 'center', zIndex: 10, backdropFilter: 'blur(12px)', boxShadow: '0 4px 30px rgba(0,0,0,0.7)', color: 'white' },
-  legend: { position: 'absolute', top: 14, right: 14, background: 'rgba(0,0,0,0.8)', color: 'white', padding: 12, borderRadius: 4, fontSize: 12, maxHeight: 'calc(100vh - 180px)', overflowY: 'auto', zIndex: 10 },
-  search: { position: 'absolute', bottom: 80, left: 10, background: 'rgba(0,0,0,0.9)', color: 'white', padding: 12, borderRadius: 8, fontSize: 13, zIndex: 10, width: 300, maxHeight: 420, display: 'flex', flexDirection: 'column', boxShadow: '0 4px 12px rgba(0,0,0,0.5)' },
-  input: { padding: '8px 12px', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.3)', borderRadius: 4, color: 'white', fontSize: 13, outline: 'none', marginBottom: 8 },
-  searchItem: { padding: 8, marginBottom: 4, background: 'rgba(255,255,255,0.05)', borderRadius: 4, cursor: 'pointer', border: '1px solid transparent', transition: 'all 0.15s' },
+  nowPlaying:  { position: 'absolute', bottom: 16, left: '50%', transform: 'translateX(-50%)', width: 'min(520px, 88vw)', background: 'rgba(0,0,0,0.9)', border: '1px solid', borderRadius: 10, padding: '12px 18px', display: 'flex', alignItems: 'center', zIndex: 10, backdropFilter: 'blur(12px)', boxShadow: '0 4px 30px rgba(0,0,0,0.7)', color: 'white' },
+  legend:      { position: 'absolute', top: 14, right: 14, background: 'rgba(0,0,0,0.8)', color: 'white', padding: 12, borderRadius: 4, fontSize: 12, maxHeight: 'calc(100vh - 180px)', overflowY: 'auto', zIndex: 10 },
+  search:      { position: 'absolute', bottom: 80, left: 10, background: 'rgba(0,0,0,0.9)', color: 'white', padding: 12, borderRadius: 8, fontSize: 13, zIndex: 10, width: 300, maxHeight: 420, display: 'flex', flexDirection: 'column', boxShadow: '0 4px 12px rgba(0,0,0,0.5)' },
+  input:       { padding: '8px 12px', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.3)', borderRadius: 4, color: 'white', fontSize: 13, outline: 'none', marginBottom: 8 },
+  searchItem:  { padding: 8, marginBottom: 4, background: 'rgba(255,255,255,0.05)', borderRadius: 4, cursor: 'pointer', border: '1px solid transparent', transition: 'all 0.15s' },
 };

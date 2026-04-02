@@ -13,6 +13,7 @@ function normalize(str) {
     .replace(/\.[^.]+$/, '')       // remove extension
     .toLowerCase()
     .replace(/[_\-]+/g, ' ')       // underscores/hyphens → spaces
+    .replace(/[^\w\s]/g, ' ')      // strip punctuation (commas, dots, etc.)
     .replace(/\s+/g, ' ')
     .trim();
 }
