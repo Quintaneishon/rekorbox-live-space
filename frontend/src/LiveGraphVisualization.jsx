@@ -119,6 +119,7 @@ export const LiveGraphVisualization = () => {
   }, [isPlaying]);
 
   const [highlightNodeId, setHighlightNodeId] = useState(null);
+  const [clickedNodes,    setClickedNodes]    = useState(new Set());
   const [searchQuery,     setSearchQuery]     = useState('');
 
   // ── Graph data load — same params as deep-audio-embeddings ────────────────
@@ -269,16 +270,18 @@ export const LiveGraphVisualization = () => {
 
     if (isHighlightActive && isHighlit)  return HIGHLIGHT_COLOR;
     if (isHighlightActive && isNeighbor) return HIGHLIGHT_NEIGHBOR;
+    if (!isOnAir && clickedNodes.has(node.id)) return '#888888';
     const c = getColor(node.tag, genreColorMap);
     return rgbToHex(...c);
-  }, [genreColorMap, playingNodeIds, activeHighlight, isHighlightActive, highlightNeighbors, blinkOn]);
+  }, [genreColorMap, playingNodeIds, activeHighlight, isHighlightActive, highlightNeighbors, clickedNodes]);
 
   const nodeVal = useCallback((node) => {
     if (playingNodeIds.has(node.id))     return blinkOn ? PLAYING_SIZE_HI : PLAYING_SIZE_LO;
     if (node.id === activeHighlight)     return 3;
     if (highlightNeighbors.has(node.id)) return PLAYING_NEIGHBOR_SIZE;
+    if (clickedNodes.has(node.id))       return 0.4;
     return 1;
-  }, [playingNodeIds, activeHighlight, highlightNeighbors, blinkOn]);
+  }, [playingNodeIds, activeHighlight, highlightNeighbors, blinkOn, clickedNodes]);
 
   const linkColor = useCallback((link) => {
     const s = typeof link.source === 'object' ? link.source.id : link.source;
@@ -339,8 +342,9 @@ export const LiveGraphVisualization = () => {
     return sprite;
   }, [playingNodeIds]);
 
-  // Click → toggle highlight
+  // Click → toggle highlight + mark as visited
   const handleNodeClick = useCallback((node) => {
+    setClickedNodes(prev => new Set(prev).add(node.id));
     setHighlightNodeId(prev => prev === node.id ? null : node.id);
   }, []);
 
